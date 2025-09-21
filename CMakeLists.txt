@@ -17,7 +17,7 @@ target_link_libraries(GraphicsEngine
     glm::glm
 )
 
-# Platform-specific OpenGL
+# OpenGL
 if(WIN32)
     target_link_libraries(GraphicsEngine PRIVATE opengl32)
 elseif(APPLE)
