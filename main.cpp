@@ -1,8 +1,14 @@
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
+#define _USE_MATH_DEFINES
+#include <cmath>
+
+// windows h is mean
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -12,14 +18,41 @@
 #include <unordered_map>
 #include <functional>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#endif
+
+// open gl shebang
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+// ftxui shabang
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/dom/elements.hpp>
 
 //fwd
-class Renderer;
 class Camera;
 class Scene;
 class GameObject;
 class Component;
-class ASCIIFilter;
+class FTXUIRenderer;
+
+// this my name space
+using namespace ftxui;
 
 //mathing it
 namespace Math {
@@ -29,17 +62,67 @@ namespace Math {
     using Mat4 = glm::mat4;
     using Quat = glm::quat;
 
-    inline Mat4 identity() { return glm::mat4(1.0f); }
-    inline Mat4 translate(const Mat4& m, const Vec3& v) { return glm::translate(m, v); }
-    inline Mat4 rotate(const Mat4& m, float angle, const Vec3& axis) { return glm::rotate(m, angle, axis); }
-    inline Mat4 scale(const Mat4& m, const Vec3& v) { return glm::scale(m, v); }
-    inline Mat4 perspective(float fov, float aspect, float near, float far) {
-        return glm::perspective(fov, aspect, near, far);
+    inline Mat4 identity() {
+        return glm::mat4(1.0f);
     }
+
+    inline Mat4 translate(const Mat4& m, const Vec3& v) {
+        return glm::translate(m, v);
+    }
+
+    inline Mat4 rotate(const Mat4& m, float angle, const Vec3& axis) {
+        return glm::rotate(m, angle, axis);
+    }
+
+    inline Mat4 scale(const Mat4& m, const Vec3& v) {
+        return glm::scale(m, v);
+    }
+
+    inline Mat4 perspective(float fov, float aspect, float nearVal, float farVal) {
+        return glm::perspective(fov, aspect, nearVal, farVal);
+    }
+
     inline Mat4 lookAt(const Vec3& eye, const Vec3& center, const Vec3& up) {
         return glm::lookAt(eye, center, up);
     }
 }
+
+// colored pallettte
+struct ColorPalette {
+    std::vector<ftxui::Color> colors;
+
+    ColorPalette() {
+        // azul placeholder
+        colors = {
+            ftxui::Color::RGB(0, 0, 20),      // brooding blue
+            ftxui::Color::RGB(0, 0, 40),      // kind blue
+            ftxui::Color::RGB(0, 20, 60),     // mild timid blue
+            ftxui::Color::RGB(0, 40, 80),     // jake blue
+            ftxui::Color::RGB(20, 60, 100),   // light blue
+            ftxui::Color::RGB(40, 80, 120),   // lighter blue
+            ftxui::Color::RGB(60, 100, 140),  // lighterest blue
+            ftxui::Color::RGB(80, 120, 160),  // very light blue
+            ftxui::Color::RGB(100, 140, 180), // pale evil blue
+            ftxui::Color::RGB(120, 160, 200), // very evil blue
+            ftxui::Color::RGB(140, 180, 220), // almost white blue
+            ftxui::Color::RGB(200, 220, 255)  // gus blue (cuz its white!!)
+        };
+    }
+
+    ftxui::Color getColor(float intensity) const {
+        if (intensity <= 0.0f) return colors[0];
+        if (intensity >= 1.0f) return colors.back();
+
+        float scaledIntensity = intensity * (colors.size() - 1);
+        int index = static_cast<int>(scaledIntensity);
+
+        if (index >= static_cast<int>(colors.size()) - 1) {
+            return colors.back();
+        }
+
+        return colors[index];
+    }
+};
 
 //timing it
 class Time {
@@ -55,7 +138,7 @@ public:
 float Time::deltaTime = 0.0f;
 float Time::totalTime = 0.0f;
 
-//in my put till she input
+//input handling
 class Input {
 private:
     static GLFWwindow* window;
@@ -113,7 +196,7 @@ Math::Vec2 Input::mousePos = Math::Vec2(0.0f);
 Math::Vec2 Input::mouseDelta = Math::Vec2(0.0f);
 bool Input::firstMouse = true;
 
-//shading it
+//shader handling
 class Shader {
 private:
     unsigned int ID;
@@ -134,10 +217,6 @@ public:
 
     void setVec3(const std::string& name, const Math::Vec3& vec) const {
         glUniform3fv(getUniformLocation(name), 1, glm::value_ptr(vec));
-    }
-
-    void setVec2(const std::string& name, const Math::Vec2& vec) const {
-        glUniform2fv(getUniformLocation(name), 1, glm::value_ptr(vec));
     }
 
     void setFloat(const std::string& name, float value) const {
@@ -168,7 +247,6 @@ private:
         glAttachShader(program, fragment);
         glLinkProgram(program);
 
-        //checking it till i linking it
         int success;
         char infoLog[512];
         glGetProgramiv(program, GL_LINK_STATUS, &success);
@@ -179,7 +257,6 @@ private:
 
         glDeleteShader(vertex);
         glDeleteShader(fragment);
-
         return program;
     }
 
@@ -189,20 +266,19 @@ private:
         glShaderSource(shader, 1, &src, nullptr);
         glCompileShader(shader);
 
-        //checking it till im compiling it
         int success;
         char infoLog[512];
         glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
         if (!success) {
             glGetShaderInfoLog(shader, 512, NULL, infoLog);
-            std::cerr << "Shader compilation failed: " << infoLog << std::endl;
+            std::cerr << "Shader compilation failed womp womp: " << infoLog << std::endl;
         }
 
         return shader;
     }
 };
 
-//meshing it
+//im mesh handling
 struct Vertex {
     Math::Vec3 Position;
     Math::Vec3 Normal;
@@ -248,15 +324,12 @@ private:
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
 
-        // Position
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(0));
         glEnableVertexAttribArray(0);
 
-        // Normal
         glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, Normal)));
         glEnableVertexAttribArray(1);
 
-        // Texture coordinates
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, TexCoords)));
         glEnableVertexAttribArray(2);
 
@@ -264,275 +337,155 @@ private:
     }
 };
 
-// loading mah resources
-class ResourceLoader {
-public:
-    static std::unique_ptr<Mesh> loadOBJ(const std::string& filepath) {
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            std::cerr << "Failed to open OBJ file: " << filepath << std::endl;
-            return nullptr;
-        }
-
-        std::vector<Math::Vec3> temp_vertices;
-        std::vector<Math::Vec3> temp_normals;
-        std::vector<Math::Vec2> temp_texCoords;
-        std::vector<Vertex> vertices;
-        std::vector<unsigned int> indices;
-
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            std::string prefix;
-            iss >> prefix;
-
-            if (prefix == "v") {
-                Math::Vec3 vertex;
-                iss >> vertex.x >> vertex.y >> vertex.z;
-                temp_vertices.push_back(vertex);
-            }
-            else if (prefix == "vn") {
-                Math::Vec3 normal;
-                iss >> normal.x >> normal.y >> normal.z;
-                temp_normals.push_back(normal);
-            }
-            else if (prefix == "vt") {
-                Math::Vec2 texCoord;
-                iss >> texCoord.x >> texCoord.y;
-                temp_texCoords.push_back(texCoord);
-            }
-            else if (prefix == "f") {
-                std::string vertex1, vertex2, vertex3;
-                iss >> vertex1 >> vertex2 >> vertex3;
-
-                auto parseVertex = [&](const std::string& vertexStr) -> Vertex {
-                    std::istringstream vss(vertexStr);
-                    std::string item;
-                    std::vector<std::string> items;
-                    while (std::getline(vss, item, '/')) {
-                        items.push_back(item);
-                    }
-
-                    Vertex vertex;
-
-                    //pos
-                    int v_idx = std::stoi(items[0]) - 1;
-                    vertex.Position = temp_vertices[v_idx];
-
-                    //texture coords
-                    if (items.size() > 1 && !items[1].empty()) {
-                        int vt_idx = std::stoi(items[1]) - 1;
-                        vertex.TexCoords = temp_texCoords[vt_idx];
-                    } else {
-                        vertex.TexCoords = Math::Vec2(0.0f);
-                    }
-
-                    //new norm
-                    if (items.size() > 2 && !items[2].empty()) {
-                        int vn_idx = std::stoi(items[2]) - 1;
-                        vertex.Normal = temp_normals[vn_idx];
-                    } else {
-                        vertex.Normal = Math::Vec3(0.0f, 1.0f, 0.0f);
-                    }
-
-                    return vertex;
-                };
-
-                vertices.push_back(parseVertex(vertex1));
-                vertices.push_back(parseVertex(vertex2));
-                vertices.push_back(parseVertex(vertex3));
-
-                indices.push_back(static_cast<unsigned int>(vertices.size() - 3));
-                indices.push_back(static_cast<unsigned int>(vertices.size() - 2));
-                indices.push_back(static_cast<unsigned int>(vertices.size() - 1));
-            }
-        }
-
-        std::cout << "Loaded OBJ: " << vertices.size() << " vertices, " << indices.size() << " indices" << std::endl;
-        return std::make_unique<Mesh>(vertices, indices);
-    }
-};
-
-//asciing it
-class ASCIIFilter {
+// it says what it is read class jake
+class FTXUIRenderer {
 private:
-    unsigned int framebuffer, colorTexture, depthBuffer;
-    unsigned int quadVAO, quadVBO;
-    std::unique_ptr<Shader> asciiShader;
-    int width, height;
-    float charSize;
+    unsigned int framebuffer = 0, colorTexture = 0, depthBuffer = 0;
+    int renderWidth = 1920, renderHeight = 1080;
+    int displayWidth = 160, displayHeight = 45;
+    std::vector<std::vector<ftxui::Color>> colorBuffer;
+    std::vector<std::string> asciiBuffer;
+    std::atomic<bool> shouldStop{false};
+    std::thread renderThread;
+    std::mutex bufferMutex;
+    ColorPalette palette;
 
-    const std::string asciiVertexShader = R"(
-        #version 330 core
-        layout (location = 0) in vec2 aPos;
-        layout (location = 1) in vec2 aTexCoords;
-
-        out vec2 TexCoords;
-
-        void main() {
-            TexCoords = aTexCoords;
-            gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0);
-        }
-    )";
-
-    const std::string asciiFragmentShader = R"(
-        #version 330 core
-        out vec4 FragColor;
-
-        in vec2 TexCoords;
-
-        uniform sampler2D screenTexture;
-        uniform vec2 resolution;
-        uniform float charSize;
-
-        // Simple ASCII character patterns using mathematical functions
-        float getCharPattern(int charIndex, vec2 localPos) {
-            vec2 pos = localPos;
-            float result = 0.0;
-
-            if (charIndex == 0) return 0.0; // space
-            if (charIndex == 1) { // .
-                float dist = distance(pos, vec2(0.5));
-                return 1.0 - smoothstep(0.1, 0.2, dist);
-            }
-            if (charIndex == 2) { // :
-                float d1 = distance(pos, vec2(0.5, 0.3));
-                float d2 = distance(pos, vec2(0.5, 0.7));
-                return (1.0 - smoothstep(0.05, 0.15, d1)) + (1.0 - smoothstep(0.05, 0.15, d2));
-            }
-            if (charIndex == 3) { // -
-                return (abs(pos.y - 0.5) < 0.1) ? 1.0 : 0.0;
-            }
-            if (charIndex == 4) { // =
-                float line1 = (abs(pos.y - 0.4) < 0.05) ? 1.0 : 0.0;
-                float line2 = (abs(pos.y - 0.6) < 0.05) ? 1.0 : 0.0;
-                return line1 + line2;
-            }
-            if (charIndex == 5) { // +
-                float h = (abs(pos.y - 0.5) < 0.08) ? 1.0 : 0.0;
-                float v = (abs(pos.x - 0.5) < 0.08) ? 1.0 : 0.0;
-                return max(h, v);
-            }
-            if (charIndex == 6) { // *
-                float d1 = abs(pos.x - pos.y) < 0.08 ? 1.0 : 0.0;
-                float d2 = abs(pos.x + pos.y - 1.0) < 0.08 ? 1.0 : 0.0;
-                float h = (abs(pos.y - 0.5) < 0.05) ? 1.0 : 0.0;
-                float v = (abs(pos.x - 0.5) < 0.05) ? 1.0 : 0.0;
-                return max(max(d1, d2), max(h, v));
-            }
-            if (charIndex == 7) { // #
-                float h1 = (abs(pos.y - 0.35) < 0.05) ? 1.0 : 0.0;
-                float h2 = (abs(pos.y - 0.65) < 0.05) ? 1.0 : 0.0;
-                float v1 = (abs(pos.x - 0.35) < 0.05) ? 1.0 : 0.0;
-                float v2 = (abs(pos.x - 0.65) < 0.05) ? 1.0 : 0.0;
-                return max(max(h1, h2), max(v1, v2));
-            }
-            if (charIndex == 8) { // %
-                float c1 = distance(pos, vec2(0.25, 0.75)) < 0.15 ? 1.0 : 0.0;
-                float c2 = distance(pos, vec2(0.75, 0.25)) < 0.15 ? 1.0 : 0.0;
-                float line = abs(pos.x + pos.y - 1.0) < 0.05 ? 1.0 : 0.0;
-                return max(max(c1, c2), line);
-            }
-            // Default for index 9 (@) - solid block
-            return 1.0;
-        }
-
-        void main() {
-            // Calculate ASCII grid position
-            vec2 gridSize = resolution / charSize;
-            vec2 gridPos = floor(TexCoords * gridSize);
-            vec2 cellPos = fract(TexCoords * gridSize);
-
-            // Sample color at cell center
-            vec2 samplePos = (gridPos + 0.5) / gridSize;
-            vec3 color = texture(screenTexture, samplePos).rgb;
-
-            // Calculate luminance
-            float luminance = dot(color, vec3(0.299, 0.587, 0.114));
-
-            // Map to ASCII character
-            int charIndex = int(luminance * 9.0);
-            charIndex = clamp(charIndex, 0, 9);
-
-            // Get pattern value
-            float pattern = getCharPattern(charIndex, cellPos);
-
-            // Terminal colors
-            vec3 terminalGreen = vec3(0.0, 1.0, 0.3);
-            vec3 bgColor = vec3(0.0, 0.05, 0.0);
-
-            // Final color
-            vec3 finalColor = mix(bgColor, terminalGreen * luminance, pattern);
-            FragColor = vec4(finalColor, 1.0);
-        }
-    )";
+    ScreenInteractive screen = ScreenInteractive::Fullscreen();
+    const std::string asciiChars = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
 
 public:
-    ASCIIFilter(int w, int h) : width(w), height(h), charSize(8.0f) {
-        setupFramebuffer();
-        setupQuad();
-        asciiShader = std::make_unique<Shader>(asciiVertexShader, asciiFragmentShader);
-
-        std::cout << "ASCII Filter initialized: " << width/charSize << "x" << height/charSize << " characters" << std::endl;
+    FTXUIRenderer() {
+        updateDisplaySize(displayWidth, displayHeight);
+        std::cout << "FTXUI ASCII Renderer initialized" << std::endl;
     }
 
-    ~ASCIIFilter() {
-        glDeleteFramebuffers(1, &framebuffer);
-        glDeleteTextures(1, &colorTexture);
-        glDeleteRenderbuffers(1, &depthBuffer);
-        glDeleteVertexArrays(1, &quadVAO);
-        glDeleteBuffers(1, &quadVBO);
+    void initializeOpenGL() {
+        setupFramebuffer();
+        std::cout << "OpenGL initialized" << std::endl;
+    }
+
+    ~FTXUIRenderer() {
+        stop();
+        if (framebuffer != 0) {
+            glDeleteFramebuffers(1, &framebuffer);
+        }
+        if (colorTexture != 0) {
+            glDeleteTextures(1, &colorTexture);
+        }
+        if (depthBuffer != 0) {
+            glDeleteRenderbuffers(1, &depthBuffer);
+        }
+    }
+
+    void start() {
+        shouldStop = false;
+        renderThread = std::thread(&FTXUIRenderer::runUI, this);
+    }
+
+    void stop() {
+        shouldStop = true;
+        if (renderThread.joinable()) {
+            screen.ExitLoopClosure()();
+            renderThread.join();
+        }
+    }
+
+    void updateDisplaySize(int width, int height) {
+        std::lock_guard<std::mutex> lock(bufferMutex);
+        displayWidth = std::clamp(width, 40, 200);
+        displayHeight = std::clamp(height, 20, 80);
+        asciiBuffer.assign(displayHeight, std::string(displayWidth, ' '));
+        colorBuffer.assign(displayHeight, std::vector<ftxui::Color>(displayWidth, ftxui::Color::Black));
     }
 
     void beginRender() {
-        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-        glViewport(0, 0, width, height);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (framebuffer != 0) {
+            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            glViewport(0, 0, renderWidth, renderHeight);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
     }
 
     void endRender() {
+        if (framebuffer == 0) return;
+
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, width, height);
-        glClear(GL_COLOR_BUFFER_BIT);
 
-        glDisable(GL_DEPTH_TEST);
-
-        asciiShader->use();
-        asciiShader->setVec2("resolution", Math::Vec2(width, height));
-        asciiShader->setFloat("charSize", charSize);
-        asciiShader->setInt("screenTexture", 0);
-
-        glActiveTexture(GL_TEXTURE0);
+        std::vector<float> pixels(renderWidth * renderHeight * 3);
         glBindTexture(GL_TEXTURE_2D, colorTexture);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, pixels.data());
 
-        glBindVertexArray(quadVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBindVertexArray(0);
+        std::lock_guard<std::mutex> lock(bufferMutex);
 
-        glEnable(GL_DEPTH_TEST);
+        float scaleX = static_cast<float>(renderWidth) / displayWidth;
+        float scaleY = static_cast<float>(renderHeight) / displayHeight;
+
+        for (int y = 0; y < displayHeight; y++) {
+            for (int x = 0; x < displayWidth; x++) {
+                float totalR = 0, totalG = 0, totalB = 0;
+                int samples = 0;
+
+                int startX = static_cast<int>(x * scaleX);
+                int endX = static_cast<int>((x + 1) * scaleX);
+                int startY = static_cast<int>(y * scaleY);
+                int endY = static_cast<int>((y + 1) * scaleY);
+
+                for (int py = startY; py < endY && py < renderHeight; py++) {
+                    for (int px = startX; px < endX && px < renderWidth; px++) {
+                        int pixelIndex = (py * renderWidth + px) * 3;
+                        totalR += pixels[pixelIndex];
+                        totalG += pixels[pixelIndex + 1];
+                        totalB += pixels[pixelIndex + 2];
+                        samples++;
+                    }
+                }
+
+                if (samples > 0) {
+                    totalR /= samples;
+                    totalG /= samples;
+                    totalB /= samples;
+                }
+
+                float luminance = 0.299f * totalR + 0.587f * totalG + 0.114f * totalB;
+                int charIndex = static_cast<int>(luminance * (asciiChars.length() - 1));
+                charIndex = std::clamp(charIndex, 0, static_cast<int>(asciiChars.length() - 1));
+
+                ftxui::Color pixelColor = palette.getColor(luminance);
+
+                int asciiY = displayHeight - 1 - y;
+                if (asciiY >= 0 && asciiY < displayHeight) {
+                    asciiBuffer[asciiY][x] = asciiChars[charIndex];
+                    colorBuffer[asciiY][x] = pixelColor;
+                }
+            }
+        }
     }
 
-    void setCharacterSize(float size) {
-        charSize = std::max(4.0f, std::min(32.0f, size));
+    Math::Vec2 getAspectRatio() const {
+        return Math::Vec2(static_cast<float>(renderWidth), static_cast<float>(renderHeight));
     }
 
 private:
     void setupFramebuffer() {
+        if (framebuffer != 0) {
+            glDeleteFramebuffers(1, &framebuffer);
+            glDeleteTextures(1, &colorTexture);
+            glDeleteRenderbuffers(1, &depthBuffer);
+        }
+
         glGenFramebuffers(1, &framebuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 
-        //coloring it till i texture
         glGenTextures(1, &colorTexture);
         glBindTexture(GL_TEXTURE_2D, colorTexture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, renderWidth, renderHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
 
-        //depthing it till i buffer
         glGenRenderbuffers(1, &depthBuffer);
         glBindRenderbuffer(GL_RENDERBUFFER, depthBuffer);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, renderWidth, renderHeight);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depthBuffer);
 
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
@@ -542,31 +495,54 @@ private:
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    void setupQuad() {
-        const float quadVertices[] = {
-            // positions   // tex coords
-            -1.0f,  1.0f,  0.0f, 1.0f,
-            -1.0f, -1.0f,  0.0f, 0.0f,
-             1.0f, -1.0f,  1.0f, 0.0f,
+    void runUI() {
+        auto component = Renderer([&] {
+            std::lock_guard<std::mutex> lock(bufferMutex);
 
-            -1.0f,  1.0f,  0.0f, 1.0f,
-             1.0f, -1.0f,  1.0f, 0.0f,
-             1.0f,  1.0f,  1.0f, 1.0f
-        };
+            std::vector<Element> lines;
+            for (int i = 0; i < displayHeight; i++) {
+                if (i < static_cast<int>(asciiBuffer.size())) {
+                    std::vector<Element> chars;
+                    for (int j = 0; j < displayWidth && j < static_cast<int>(asciiBuffer[i].length()); j++) {
+                        std::string charStr(1, asciiBuffer[i][j]);
+                        chars.push_back(text(charStr) | color(colorBuffer[i][j]));
+                    }
+                    lines.push_back(hbox(chars));
+                }
+            }
 
-        glGenVertexArrays(1, &quadVAO);
-        glGenBuffers(1, &quadVBO);
-        glBindVertexArray(quadVAO);
-        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+            return vbox({
+                text("3D Renderer [1920x1080 -> " +
+                     std::to_string(displayWidth) + "x" + std::to_string(displayHeight) + "]") | bold | center,
+                separator(),
+                vbox(lines),
+                separator(),
+                hbox({
+                    text("WASD+Mouse: Move | Space/Shift: Up/Down") | dim,
+                    text(" | ") | dim,
+                    text("T: Toggle OpenGL | R: Reset Camera | ESC: Exit") | dim
+                }) | center
+            }) | border;
+        });
+
+        std::thread refresh_thread([&] {
+            while (!shouldStop) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                if (!shouldStop) {
+                    screen.PostEvent(Event::Custom);
+                }
+            }
+        });
+
+        screen.Loop(component);
+        shouldStop = true;
+
+        if (refresh_thread.joinable()) {
+            refresh_thread.join();
+        }
     }
 };
 
-//transforming it till i component
 class Transform {
 public:
     Math::Vec3 position{0.0f};
@@ -586,10 +562,9 @@ public:
     void rotate(const Math::Vec3& delta) { rotation += delta; }
 };
 
-//cameraing it till i component
 class Camera {
 public:
-    Math::Vec3 position{0.0f, 0.0f, 3.0f};
+    Math::Vec3 position{0.0f, 0.0f, 8.0f};
     Math::Vec3 front{0.0f, 0.0f, -1.0f};
     Math::Vec3 up{0.0f, 1.0f, 0.0f};
     Math::Vec3 right{1.0f, 0.0f, 0.0f};
@@ -601,7 +576,7 @@ public:
     float farPlane{100.0f};
 
     void processInput(float deltaTime) {
-        float speed = 5.0f * deltaTime;
+        float speed = 8.0f * deltaTime;
 
         if (Input::getKey(GLFW_KEY_W))
             position += speed * front;
@@ -618,13 +593,20 @@ public:
     }
 
     void processMouseInput(Math::Vec2 mouseDelta) {
-        float sensitivity = 0.1f;
+        float sensitivity = 0.15f;
         yaw += mouseDelta.x * sensitivity;
         pitch += mouseDelta.y * sensitivity;
 
         if (pitch > 89.0f) pitch = 89.0f;
         if (pitch < -89.0f) pitch = -89.0f;
 
+        updateVectors();
+    }
+
+    void reset() {
+        position = Math::Vec3(0.0f, 0.0f, 8.0f);
+        yaw = -90.0f;
+        pitch = 0.0f;
         updateVectors();
     }
 
@@ -648,7 +630,6 @@ private:
     }
 };
 
-//gaming it till i object
 class GameObject {
 public:
     Transform transform;
@@ -671,7 +652,6 @@ public:
     }
 };
 
-//spinning mah object for testing
 class SpinningObject : public GameObject {
 public:
     Math::Vec3 spinSpeed{0.0f, 1.0f, 0.5f};
@@ -681,7 +661,6 @@ public:
     }
 };
 
-//scening my manage
 class Scene {
 private:
     std::vector<std::unique_ptr<GameObject>> gameObjects;
@@ -710,18 +689,17 @@ public:
     size_t getObjectCount() const { return gameObjects.size(); }
 };
 
-//grafix
 class GraphicsEngine {
 private:
     GLFWwindow* window;
     std::unique_ptr<Shader> defaultShader;
-    std::unique_ptr<ASCIIFilter> asciiFilter;
+    std::unique_ptr<FTXUIRenderer> ftxuiRenderer;
     Camera camera;
     Scene scene;
-    bool asciiMode = true;
+    bool showOpenGLWindow = false;
 
-    static const int WIDTH = 1200;
-    static const int HEIGHT = 800;
+    static const int OPENGL_WIDTH = 1920;
+    static const int OPENGL_HEIGHT = 1080;
 
     const std::string vertexShaderSource = R"(
         #version 330 core
@@ -760,18 +738,15 @@ private:
         uniform vec3 objectColor;
 
         void main() {
-            // Ambient
             float ambientStrength = 0.15;
             vec3 ambient = ambientStrength * lightColor;
 
-            // Diffuse
             vec3 norm = normalize(Normal);
             vec3 lightDir = normalize(lightPos - FragPos);
             float diff = max(dot(norm, lightDir), 0.0);
             vec3 diffuse = diff * lightColor;
 
-            // Specular
-            float specularStrength = 0.8;
+            float specularStrength = 0.6;
             vec3 viewDir = normalize(viewPos - FragPos);
             vec3 reflectDir = reflect(-lightDir, norm);
             float spec = pow(max(dot(viewDir, reflectDir), 0.0), 64);
@@ -784,7 +759,6 @@ private:
 
 public:
     bool initialize() {
-        // initialize GLFW
         if (!glfwInit()) {
             std::cerr << "Failed to initialize GLFW" << std::endl;
             return false;
@@ -793,9 +767,10 @@ public:
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        glfwWindowHint(GLFW_SAMPLES, 4);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUSED, GLFW_TRUE);
 
-        window = glfwCreateWindow(WIDTH, HEIGHT, "ASCII 3D Graphics Engine", nullptr, nullptr);
+        window = glfwCreateWindow(OPENGL_WIDTH, OPENGL_HEIGHT, "3D Renderer", nullptr, nullptr);
         if (!window) {
             std::cerr << "Failed to create GLFW window" << std::endl;
             glfwTerminate();
@@ -803,182 +778,254 @@ public:
         }
 
         glfwMakeContextCurrent(window);
-        glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        glfwSwapInterval(1);
+        glfwSwapInterval(0);
 
-        // initialize OpenGL
         if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
             std::cerr << "Failed to initialize GLAD" << std::endl;
             return false;
         }
 
-        // OpenGL settings
         glEnable(GL_DEPTH_TEST);
-        glEnable(GL_MULTISAMPLE);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
+        glEnable(GL_MULTISAMPLE);
 
-        // initialize systems
         Input::initialize(window);
         defaultShader = std::make_unique<Shader>(vertexShaderSource, fragmentShaderSource);
-        asciiFilter = std::make_unique<ASCIIFilter>(WIDTH, HEIGHT);
+        ftxuiRenderer = std::make_unique<FTXUIRenderer>();
 
-        std::cout << "ASCII Graphics Engine initialized successfully!" << std::endl;
+        ftxuiRenderer->initializeOpenGL();
+
         std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
         std::cout << "\nControls:" << std::endl;
         std::cout << "  WASD + Mouse: Move camera" << std::endl;
         std::cout << "  Space/Shift: Move up/down" << std::endl;
-        std::cout << "  T: Toggle ASCII mode" << std::endl;
-        std::cout << "  +/-: Adjust ASCII character size" << std::endl;
+        std::cout << "  T: Toggle OpenGL window" << std::endl;
+        std::cout << "  R: Reset camera" << std::endl;
         std::cout << "  ESC: Exit" << std::endl;
 
+        ftxuiRenderer->start();
         return true;
     }
 
-    void loadTestScene() {
-        // loading mah obj
-        auto mesh = ResourceLoader::loadOBJ("model.obj");
-        if (mesh) {
-            auto spinningObj = std::make_unique<SpinningObject>();
-            spinningObj->setMesh(std::move(mesh));
-            scene.addGameObject(std::move(spinningObj));
-            std::cout << "Test scene loaded with spinning object" << std::endl;
-        } else {
-            std::cout << "Could not load model.obj, creating default scene" << std::endl;
-            createDefaultCube();
-        }
-
-        // there was a second obj mr president
-        createSecondObject();
-    }
-
-    void createDefaultCube() {
-        std::vector<Vertex> vertices = {
-            // Front face
-            {{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-            {{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-            {{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-            {{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
-            // Back face
-            {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
-            {{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
-            {{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
-            {{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}}
-        };
-
-        std::vector<unsigned int> indices = {
-            0, 1, 2, 2, 3, 0,  // Front
-            4, 5, 6, 6, 7, 4,  // Back
-            4, 0, 3, 3, 5, 4,  // Left
-            1, 7, 6, 6, 2, 1,  // Right
-            3, 2, 6, 6, 5, 3,  // Top
-            4, 7, 1, 1, 0, 4   // Bottom
-        };
-
+    void createAdvancedTestScene() {
         auto cube = std::make_unique<SpinningObject>();
-        cube->setMesh(std::make_unique<Mesh>(vertices, indices));
+        cube->transform.scale = Math::Vec3(2.0f);
+        cube->spinSpeed = Math::Vec3(0.3f, 0.8f, 0.4f);
+        cube->setMesh(createCubeMesh());
         scene.addGameObject(std::move(cube));
-        std::cout << "Created default cube" << std::endl;
-    }
-
-    void createSecondObject() {
-        // Create pyramid
-        std::vector<Vertex> vertices = {
-            {{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-            {{ 0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-            {{ 0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
-            {{-0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
-            {{ 0.0f,  0.5f,  0.0f}, {0.0f, 1.0f, 0.0f}, {0.5f, 0.5f}}
-        };
-
-        std::vector<unsigned int> indices = {
-            0, 1, 2, 2, 3, 0,  // Base
-            0, 4, 1, 1, 4, 2,  // Sides
-            2, 4, 3, 3, 4, 0
-        };
 
         auto pyramid = std::make_unique<SpinningObject>();
-        pyramid->spinSpeed = Math::Vec3(0.5f, -0.8f, 0.3f);
-        pyramid->transform.position = Math::Vec3(2.5f, 0.0f, 0.0f);
-        pyramid->setMesh(std::make_unique<Mesh>(vertices, indices));
+        pyramid->transform.position = Math::Vec3(5.0f, 0.0f, 0.0f);
+        pyramid->transform.scale = Math::Vec3(1.5f);
+        pyramid->spinSpeed = Math::Vec3(-0.2f, 1.2f, -0.3f);
+        pyramid->setMesh(createPyramidMesh());
         scene.addGameObject(std::move(pyramid));
-        std::cout << "Created pyramid object" << std::endl;
+
+        auto complexObj = std::make_unique<SpinningObject>();
+        complexObj->transform.position = Math::Vec3(-4.0f, 2.0f, -2.0f);
+        complexObj->transform.scale = Math::Vec3(1.2f);
+        complexObj->spinSpeed = Math::Vec3(0.5f, -0.4f, 0.7f);
+        complexObj->setMesh(createComplexMesh());
+        scene.addGameObject(std::move(complexObj));
+
+        auto floor = std::make_unique<GameObject>();
+        floor->transform.position = Math::Vec3(0.0f, -3.0f, 0.0f);
+        floor->transform.scale = Math::Vec3(10.0f, 0.1f, 10.0f);
+        floor->setMesh(createCubeMesh());
+        scene.addGameObject(std::move(floor));
+
+        std::cout << "test scene is great" << std::endl;
+    }
+// my cube.. my shame
+    std::unique_ptr<Mesh> createCubeMesh() {
+        std::vector<Vertex> vertices = {
+            {{-1.0f, -1.0f,  1.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+            {{ 1.0f, -1.0f,  1.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+            {{ 1.0f,  1.0f,  1.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+            {{-1.0f,  1.0f,  1.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+            {{-1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
+            {{-1.0f,  1.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
+            {{ 1.0f,  1.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
+            {{ 1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+            {{-1.0f, -1.0f, -1.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+            {{-1.0f, -1.0f,  1.0f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+            {{-1.0f,  1.0f,  1.0f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+            {{-1.0f,  1.0f, -1.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+            {{ 1.0f, -1.0f, -1.0f}, { 1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+            {{ 1.0f,  1.0f, -1.0f}, { 1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+            {{ 1.0f,  1.0f,  1.0f}, { 1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+            {{ 1.0f, -1.0f,  1.0f}, { 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+            {{-1.0f,  1.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+            {{-1.0f,  1.0f,  1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+            {{ 1.0f,  1.0f,  1.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+            {{ 1.0f,  1.0f, -1.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+            {{-1.0f, -1.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+            {{ 1.0f, -1.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+            {{ 1.0f, -1.0f,  1.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
+            {{-1.0f, -1.0f,  1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}}
+        };
+
+        std::vector<unsigned int> indices = {
+            0,  1,  2,   2,  3,  0,   4,  5,  6,   6,  7,  4,
+            8,  9,  10,  10, 11, 8,   12, 13, 14,  14, 15, 12,
+            16, 17, 18,  18, 19, 16,  20, 21, 22,  22, 23, 20
+        };
+
+        return std::make_unique<Mesh>(vertices, indices);
+    }
+
+    std::unique_ptr<Mesh> createPyramidMesh() {
+        std::vector<Vertex> vertices = {
+            {{-1.0f, -1.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
+            {{ 1.0f, -1.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
+            {{ 1.0f, -1.0f,  1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+            {{-1.0f, -1.0f,  1.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+            {{ 0.0f,  1.5f,  0.0f}, {0.0f, 1.0f, 0.0f}, {0.5f, 0.5f}}
+        };
+
+        std::vector<unsigned int> indices = {
+            0, 1, 2, 2, 3, 0,  0, 4, 1,  1, 4, 2,  2, 4, 3,  3, 4, 0
+        };
+
+        return std::make_unique<Mesh>(vertices, indices);
+    }
+
+    std::unique_ptr<Mesh> createComplexMesh() {
+        std::vector<Vertex> vertices;
+        std::vector<unsigned int> indices;
+
+        const float radius = 1.0f;
+        const int segments = 8;
+
+        vertices.push_back({{0.0f, 1.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.5f, 1.0f}});
+
+        for (int i = 0; i < segments; ++i) {
+            float angle = 2.0f * static_cast<float>(M_PI) * i / segments;
+            float x = radius * cos(angle);
+            float z = radius * sin(angle);
+            Math::Vec3 normal = glm::normalize(Math::Vec3(x, 0.0f, z));
+            vertices.push_back({{x, 0.0f, z}, normal, {static_cast<float>(i) / segments, 0.5f}});
+        }
+
+        vertices.push_back({{0.0f, -1.5f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.5f, 0.0f}});
+
+        for (int i = 0; i < segments; ++i) {
+            indices.push_back(0);
+            indices.push_back(1 + i);
+            indices.push_back(1 + (i + 1) % segments);
+        }
+
+        for (int i = 0; i < segments; ++i) {
+            indices.push_back(segments + 1);
+            indices.push_back(1 + (i + 1) % segments);
+            indices.push_back(1 + i);
+        }
+
+        return std::make_unique<Mesh>(vertices, indices);
     }
 
     void run() {
-        std::cout << "Starting main loop with ASCII filter..." << std::endl;
+        std::cout << "ASCII rendering..." << std::endl;
+
+        const double targetFrameTime = 1.0 / 30.0;
+        double lastFrameTime = glfwGetTime();
 
         while (!glfwWindowShouldClose(window)) {
-            Time::update();
+            double currentTime = glfwGetTime();
+            double deltaTime = currentTime - lastFrameTime;
 
-            // Input processing
-            if (Input::getKey(GLFW_KEY_ESCAPE)) {
-                glfwSetWindowShouldClose(window, true);
-            }
+            if (deltaTime >= targetFrameTime) {
+                Time::update();
+                glfwPollEvents();
 
-            if (Input::getKeyDown(GLFW_KEY_T)) {
-                asciiMode = !asciiMode;
-                std::cout << "ASCII mode: " << (asciiMode ? "ON" : "OFF") << std::endl;
-            }
+                if (Input::getKey(GLFW_KEY_ESCAPE)) {
+                    glfwSetWindowShouldClose(window, true);
+                    break;
+                }
 
-            // Character size adjustment
-            static float charSize = 8.0f;
-            if (Input::getKey(GLFW_KEY_EQUAL) || Input::getKey(GLFW_KEY_KP_ADD)) {
-                charSize = std::max(4.0f, charSize - 0.2f);
-                asciiFilter->setCharacterSize(charSize);
-            }
-            if (Input::getKey(GLFW_KEY_MINUS) || Input::getKey(GLFW_KEY_KP_SUBTRACT)) {
-                charSize = std::min(32.0f, charSize + 0.2f);
-                asciiFilter->setCharacterSize(charSize);
-            }
+                if (Input::getKeyDown(GLFW_KEY_T)) {
+                    showOpenGLWindow = !showOpenGLWindow;
+                    if (showOpenGLWindow) {
+                        glfwShowWindow(window);
+                    } else {
+                        glfwHideWindow(window);
+                    }
+                }
 
-            camera.processInput(Time::deltaTime);
-            camera.processMouseInput(Input::getMouseDelta());
+                if (Input::getKeyDown(GLFW_KEY_R)) {
+                    camera.reset();
+                }
 
-            scene.update(Time::deltaTime);
+                camera.processInput(Time::deltaTime);
+                camera.processMouseInput(Input::getMouseDelta());
+                scene.update(Time::deltaTime);
 
-            // Rendering
-            if (asciiMode) {
-                asciiFilter->beginRender();
-                renderScene();
-                asciiFilter->endRender();
+                int termWidth = 160, termHeight = 45;
+
+                #ifdef _WIN32
+                CONSOLE_SCREEN_BUFFER_INFO csbi;
+                HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+                if (GetConsoleScreenBufferInfo(hConsole, &csbi)) {
+                    termWidth = std::max(80, csbi.srWindow.Right - csbi.srWindow.Left + 1);
+                    termHeight = std::max(24, csbi.srWindow.Bottom - csbi.srWindow.Top + 1 - 4);
+                }
+                #endif
+
+                ftxuiRenderer->updateDisplaySize(termWidth, termHeight);
+
+                Math::Vec2 renderSize = ftxuiRenderer->getAspectRatio();
+                float aspectRatio = renderSize.x / renderSize.y;
+
+                ftxuiRenderer->beginRender();
+                renderScene(aspectRatio);
+                ftxuiRenderer->endRender();
+
+                if (showOpenGLWindow) {
+                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    glViewport(0, 0, OPENGL_WIDTH, OPENGL_HEIGHT);
+                    glClearColor(0.02f, 0.02f, 0.08f, 1.0f);
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                    renderScene(static_cast<float>(OPENGL_WIDTH) / OPENGL_HEIGHT);
+                    glfwSwapBuffers(window);
+                }
+
+                Input::update();
+                lastFrameTime = currentTime;
             } else {
-                glClearColor(0.05f, 0.05f, 0.1f, 1.0f);
-                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                renderScene();
+                glfwPollEvents();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-
-            glfwSwapBuffers(window);
-            glfwPollEvents();
-            Input::update();
         }
+
+        ftxuiRenderer->stop();
     }
 
-    void renderScene() {
+    void renderScene(float aspectRatio) {
         defaultShader->use();
         defaultShader->setMat4("view", camera.getViewMatrix());
-        defaultShader->setMat4("projection", camera.getProjectionMatrix(static_cast<float>(WIDTH) / HEIGHT));
+        defaultShader->setMat4("projection", camera.getProjectionMatrix(aspectRatio));
         defaultShader->setVec3("viewPos", camera.position);
-        defaultShader->setVec3("lightPos", Math::Vec3(2.0f, 4.0f, 2.0f));
-        defaultShader->setVec3("lightColor", Math::Vec3(1.0f, 1.0f, 1.0f));
-        defaultShader->setVec3("objectColor", Math::Vec3(0.8f, 0.6f, 0.4f));
+        defaultShader->setVec3("lightPos", Math::Vec3(6.0f, 10.0f, 8.0f));
+        defaultShader->setVec3("lightColor", Math::Vec3(1.2f, 1.1f, 1.0f));
+        defaultShader->setVec3("objectColor", Math::Vec3(0.9f, 0.85f, 0.7f));
 
         scene.render(*defaultShader);
     }
 
     void shutdown() {
-        glfwTerminate();
-        std::cout << "ASCII Graphics Engine shut down" << std::endl;
-    }
+        #ifdef _WIN32
+        system("cls");
+        #else
+        system("clear");
+        #endif
 
-private:
-    static void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
-        glViewport(0, 0, width, height);
+        std::cout << " complete" << std::endl;
+        glfwTerminate();
     }
 };
 
-// main
 int main() {
     GraphicsEngine engine;
 
@@ -986,7 +1033,7 @@ int main() {
         return -1;
     }
 
-    engine.loadTestScene();
+    engine.createAdvancedTestScene();
     engine.run();
     engine.shutdown();
 
